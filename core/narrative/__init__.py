@@ -23,6 +23,7 @@ class BeatSchema(BaseModel):
     dramatic_function: DramaticFunction
     target_words: int | None = None
     emotional_target: str | None = None
+    detail: str = ""  # 节拍的详细写作指导
 
 
 class SequenceSchema(BaseModel):
@@ -46,6 +47,8 @@ class ChapterOutlineSchema(BaseModel):
     emotional_arc: dict[str, str] = Field(default_factory=dict)
     mandatory_tasks: list[str] = Field(default_factory=list)
     target_words: int = 4000
+    writing_notes: str = ""  # 整章写作基调指导
+    pov: str = ""  # 视角角色说明
 
 
 class SceneCardSchema(BaseModel):

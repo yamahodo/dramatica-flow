@@ -483,6 +483,29 @@ async function deleteBook(id) {
   await loadBooks();
 }
 
+async function batchAutoGenerateThreads() {
+  if (!allBooks.length) { toast('没有书籍', false); return; }
+  if (!confirm('将为所有书籍扫描章纲并自动生成线程（已有线程不会删除），是否继续？')) return;
+  toast('正在批量生成线程...', 'loading');
+  let totalCreated = 0, totalUpdated = 0, totalSkipped = 0;
+  const results = [];
+  for (const book of allBooks) {
+    try {
+      const res = await api('/books/' + book.id + '/auto-generate-threads', { method: 'POST' });
+      totalCreated += res.threads_created || 0;
+      totalUpdated += res.threads_updated || 0;
+      if (res.threads_created === 0 && res.threads_updated === 0) totalSkipped++;
+      const chars = (res.pov_characters_found || []).join('、');
+      results.push(book.title + '：+' + (res.threads_created||0) + ' 更新' + (res.threads_updated||0) + (chars ? ' (' + chars + ')' : ''));
+    } catch (e) {
+      results.push(book.title + '：跳过（' + ((e && e.message) || '无章纲') + '）');
+      totalSkipped++;
+    }
+  }
+  document.querySelectorAll('.toast-persist').forEach(function(e) { e.remove(); });
+  toast('批量完成：新增 ' + totalCreated + ' 条，更新 ' + totalUpdated + ' 条，跳过 ' + totalSkipped + ' 本。\n\n' + results.join('\n'), true, 10000);
+}
+
 async function editBookSettings(id) {
   const b = allBooks.find(x => x.id === id);
   if (!b) return;
@@ -610,7 +633,10 @@ function loadStep2() {
     return;
   }
   p.innerHTML = `
-    <div class="toolbar" style="justify-content:center"><button class="btn btn-primary" onclick="showCreateBookModal()">+ 创建新书</button></div>
+    <div class="toolbar" style="justify-content:center">
+      <button class="btn btn-primary" onclick="showCreateBookModal()">+ 创建新书</button>
+      <button class="btn btn-success" onclick="batchAutoGenerateThreads()" title="为所有已有章节大纲的书籍自动生成线程">&#9889; 批量生成线程</button>
+    </div>
     <div style="max-width:600px;margin:0 auto">
       ${allBooks.map(b => `
         <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px;cursor:pointer;background:var(--surface);transition:all .15s"
@@ -1484,7 +1510,10 @@ async function loadThreadsData() {
   cont.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
       <div style="font-size:12px;color:var(--text2)">叙事线程 (${threadsCache.length}) — 多线叙事的核心单位，每条线程有独立视角角色和目标</div>
-      <button class="btn btn-sm btn-primary" onclick="showAddThreadModal()">+ 添加线程</button>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-success" onclick="autoGenerateThreads()" title="从章节大纲的 POV 角色自动生成线程">&#9889; 从章纲生成</button>
+        <button class="btn btn-sm btn-primary" onclick="showAddThreadModal()">+ 添加线程</button>
+      </div>
     </div>
     ${threadsCache.length ? threadsCache.map((t, i) => `
       <div class="form-item-card" style="border-left:3px solid ${typeColors[t.type]||'var(--border)'}">
@@ -1633,6 +1662,33 @@ async function deleteThread(threadId) {
     toast('已删除', true);
     await loadThreadsData();
   } catch (e) { toast('删除失败', false); }
+}
+
+async function autoGenerateThreads() {
+  if (!currentBook) return;
+  const existing = threadsCache.length;
+  if (existing > 0 && !confirm('当前已有 ' + existing + ' 条线程。自动生成将保留已有线程并补充新的，是否继续？')) return;
+  try {
+    toast('正在从章纲扫描 POV 角色...', 'loading');
+    const res = await api('/books/' + currentBook.id + '/auto-generate-threads', {
+      method: 'POST',
+    });
+    const detail = res.detail || {};
+    const detailArr = Object.entries(detail).map(function(pair) {
+      return pair[0] + '：' + pair[1].count + ' 章';
+    });
+    const detailStr = detailArr.join('、');
+    let msg = '生成完成：新增 ' + res.threads_created + ' 条，更新 ' + res.threads_updated + ' 条';
+    if (detailStr) msg += '\n' + detailStr;
+    if (res.message) msg += '\n' + res.message;
+    document.querySelectorAll('.toast-persist').forEach(function(e) { e.remove(); });
+    toast(msg, true, 8000);
+    await loadThreadsData();
+  } catch (e) {
+    document.querySelectorAll('.toast-persist').forEach(function(e) { e.remove(); });
+    const msg = (e && e.message) || '生成失败';
+    toast(msg.includes('404') ? '请先生成章节大纲' : msg, false, 8000);
+  }
 }
 
 // ── Step 3 JSON 模式 ─────────────────────────────────────────────────────

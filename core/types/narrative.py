@@ -55,6 +55,8 @@ class Beat:
     emotional_target: str | None = None
     # 该节拍的视角角色（多线叙事用）
     pov_character_id: str | None = None
+    # 节拍的详细写作指导
+    detail: str = ""
 
 
 # ── 角色动力学 ────────────────────────────────────────────────────────────────

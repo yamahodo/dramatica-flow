@@ -260,6 +260,8 @@ class WriterAgent:
         pending_hooks: str = "",
         causal_chain: str = "",
         emotional_arcs: str = "",
+        writing_notes: str = "",
+        pov_instruction: str = "",
     ) -> WriterOutput:
         system = WRITER_SYSTEM_PROMPT.format(genre=self.genre)
         if self.style_guide:
@@ -312,7 +314,12 @@ class WriterAgent:
 
 ### 节拍序列（按顺序写完所有节拍）
 {scene_summaries}
-{pov_section}{thread_section}
+{pov_section}{thread_section}{f'''### 视角要求
+{pov_instruction.strip()}
+''' if pov_instruction and pov_instruction.strip() else ''}
+{f'''### 写作基调（本章重要指导）
+{writing_notes.strip()}
+''' if writing_notes and writing_notes.strip() else ''}
 ### 主角
 姓名：{protagonist.name}
 外部目标：{protagonist.need.external}

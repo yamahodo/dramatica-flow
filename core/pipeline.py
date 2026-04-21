@@ -193,6 +193,8 @@ class WritingPipeline:
             pending_hooks=pending_hooks,
             causal_chain=causal_chain,
             emotional_arcs=emotional_arcs,
+            writing_notes=chapter_outline.writing_notes,
+            pov_instruction=chapter_outline.pov,
         )
         self.sm.save_draft(ch, writer_output.content)
         log(f"草稿 {len(writer_output.content)} 字")
@@ -614,6 +616,8 @@ def _format_beats(chapter_outline: ChapterOutlineSchema) -> str:
         if b.target_words:
             line += f"（约 {b.target_words} 字）"
         lines.append(line)
+        if b.detail:
+            lines.append(f"  写作指导：{b.detail}")
     return "\n".join(lines) if lines else "（无节拍信息，根据章节摘要自由发挥）"
 
 

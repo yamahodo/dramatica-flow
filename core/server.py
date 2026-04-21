@@ -753,6 +753,153 @@ def create_thread_api(book_id: str, req: CreateThreadReq):
     return {"ok": True, "thread_id": req.id}
 
 
+@app.post("/api/books/{book_id}/auto-generate-threads")
+def auto_generate_threads(book_id: str):
+    """
+    从已有角色列表出发，扫描章节大纲，为每个作为 POV 出现的角色生成叙事线程。
+    匹配方式：角色名出现在章纲的 pov 文本、pov_character_id 或 beats 描述中。
+    已有同名线程不会重复创建，只更新其关联章节信息。
+    """
+    from core.types.narrative import NarrativeThread, ThreadType
+    from core.setup import SetupLoader
+    sm = _sm(book_id)
+    ws = sm.read_world_state()
+
+    # 1. 从 setup 加载角色列表（角色在前面就已经配好了）
+    try:
+        state = SetupLoader.restore(PROJECT_ROOT, book_id)
+        characters = state.characters  # dict[str, Character]
+    except FileNotFoundError:
+        raise HTTPException(404, "请先完成世界观配置（Step 3）")
+
+    if not characters:
+        return {"ok": True, "threads_created": 0, "threads_updated": 0,
+                "message": "角色列表为空，请先配置角色"}
+
+    # 2. 读取章纲
+    co_path = sm.state_dir / "chapter_outlines.json"
+    if not co_path.exists():
+        raise HTTPException(404, "请先生成章节大纲")
+    all_cos = json.loads(co_path.read_text(encoding="utf-8"))
+
+    # 3. 按名字长度降序排列，优先匹配长名字（"慕容玄霜" > "慕容"）
+    char_list = sorted(characters.values(), key=lambda c: len(c.name), reverse=True)
+    char_names = [c.name for c in char_list]
+    char_id_map = {c.name: c.id for c in char_list}  # 名字 → ID
+
+    # 4. 对每个章节，找出 POV 角色
+    pov_chapters: dict[str, list[int]] = {}
+    for co in all_cos:
+        ch = co.get("chapter_number", 0)
+        found_pov = ""
+        pov_id = co.get("pov_character_id", "").strip()
+        if pov_id:
+            found_pov = characters[pov_id].name if pov_id in characters else pov_id
+        if not found_pov:
+            pov_text = co.get("pov", "")
+            if pov_text:
+                for name in char_names:
+                    if name in pov_text:
+                        found_pov = name
+                        break
+        if not found_pov:
+            for beat in co.get("beats", []):
+                bp = beat.get("pov_character_id", "").strip()
+                if bp:
+                    found_pov = characters[bp].name if bp in characters else bp
+                    break
+                bd = beat.get("description", "")
+                if bd:
+                    for name in char_names:
+                        if name in bd:
+                            found_pov = name
+                            break
+                if found_pov:
+                    break
+        if found_pov:
+            pov_chapters.setdefault(found_pov, []).append(ch)
+
+    if not pov_chapters:
+        names = char_names[:5]
+        if len(char_names) > 5:
+            names.append("等" + str(len(char_names)) + "个角色")
+        return {"ok": True, "threads_created": 0, "threads_updated": 0,
+                "message": "章纲中未匹配到 POV 角色。已有角色：" + "、".join(names)}
+
+    # 5. 创建/更新线程
+    existing_thread_ids: set[str] = {t.id for t in ws.threads}
+
+    created = 0
+    updated = 0
+    max_ch_count = max(len(v) for v in pov_chapters.values())
+
+    for pov_name, chapters in sorted(pov_chapters.items()):
+        # 检查是否已有该 POV 角色的线程
+        existing = None
+        for t in ws.threads:
+            if t.pov_character_id == pov_name:
+                existing = t
+                break
+            if pov_name in (t.character_ids or []):
+                existing = t
+                break
+
+        start_ch = min(chapters)
+        char_id = char_id_map.get(pov_name, "")
+
+        if existing:
+            updates = {}
+            if existing.start_chapter > start_ch:
+                updates["start_chapter"] = start_ch
+            if existing.last_active_chapter < max(chapters):
+                updates["last_active_chapter"] = max(chapters)
+            if len(chapters) == max_ch_count and existing.type != ThreadType.MAIN:
+                updates["type"] = ThreadType.MAIN
+                updates["weight"] = 1.0
+            if updates:
+                sm.update_thread(existing.id, **updates)
+                updated += 1
+        else:
+            if len(chapters) == max_ch_count:
+                thread_type = ThreadType.MAIN
+                weight = 1.0
+            else:
+                thread_type = ThreadType.SUBPLOT
+                weight = 0.7
+
+            final_id = f"thread_{pov_name}"
+            if final_id in existing_thread_ids:
+                final_id = f"thread_{pov_name}_{uuid.uuid4().hex[:4]}"
+
+            new_thread = NarrativeThread(
+                id=final_id,
+                name=f"{pov_name}线",
+                type=thread_type,
+                pov_character_id=char_id or pov_name,
+                start_chapter=start_ch,
+                last_active_chapter=max(chapters),
+                weight=weight,
+                goal="",
+                growth_arc="",
+                status="active",
+                character_ids=[],
+                end_hook="",
+            )
+            sm.create_thread(new_thread)
+            existing_thread_ids.add(final_id)
+            created += 1
+
+    sm.update_thread_status_md()
+
+    return {
+        "ok": True,
+        "threads_created": created,
+        "threads_updated": updated,
+        "pov_characters_found": list(pov_chapters.keys()),
+        "detail": {pov: {"chapters": chs, "count": len(chs)} for pov, chs in pov_chapters.items()},
+    }
+
+
 @app.put("/api/books/{book_id}/threads/{thread_id}")
 def update_thread_api(book_id: str, thread_id: str, req: UpdateThreadReq):
     """更新叙事线程"""
@@ -1710,7 +1857,7 @@ async def extract_story_state(book_id: str, req: ExtractStoryStateReq):
         ws.causal_chain.append(cl)
         applied["causal"] += 1
 
-    # 构建角色名 → 线程ID 的映射（用于自动分配 thread_id）
+    # 构建角色名 → 线程ID 的映射（用于时间轴事件分配，只匹配已有线程）
     char_to_thread: dict[str, str] = {}
     for t in ws.threads:
         # 通过 pov_character_id 匹配
@@ -1723,39 +1870,17 @@ async def extract_story_state(book_id: str, req: ExtractStoryStateReq):
         if t.name:
             char_to_thread.setdefault(t.name, t.id)
 
-    # 如果 LLM 返回了 chapter_main_characters，尝试匹配/创建线程
-    main_chars = data.get("chapter_main_characters", [])
-    for mc in main_chars:
-        mc_stripped = mc.strip()
-        if not mc_stripped:
-            continue
-        # 如果这个角色名还没映射到线程，自动创建一条
-        if mc_stripped not in char_to_thread:
-            new_thread_id = f"thread_{mc_stripped}"
-            # 避免ID冲突
-            existing_ids = {t.id for t in ws.threads}
-            if new_thread_id in existing_ids:
-                new_thread_id = f"thread_{mc_stripped}_{uuid.uuid4().hex[:4]}"
-            from core.types.narrative import NarrativeThread, ThreadType
-            new_thread = NarrativeThread(
-                id=new_thread_id,
-                name=f"{mc_stripped}线",
-                type=ThreadType.SUBPLOT if len(ws.threads) > 0 else ThreadType.MAIN,
-                pov_character_id=mc_stripped,
-                start_chapter=req.chapter,
-                last_active_chapter=req.chapter,
-                goal="",
-                growth_arc="",
-                weight=0.5,
-                status="active",
-                character_ids=[],
-                end_hook="",
-            )
-            ws.threads.append(new_thread)
-            char_to_thread[mc_stripped] = new_thread_id
+    # 尝试从章纲获取当前章节的 thread_id（优先于请求参数）
+    co_path = sm.state_dir / "chapter_outlines.json"
+    if co_path.exists():
+        co_data = json.loads(co_path.read_text(encoding="utf-8"))
+        for co in co_data:
+            if co.get("chapter_number") == req.chapter and co.get("thread_id"):
+                req.thread_id = co["thread_id"]
+                break
 
     def _resolve_thread_id(character_name: str) -> str:
-        """根据角色名查找对应的线程ID，找不到则回退到第一个匹配的角色线程或默认"""
+        """根据角色名查找对应的线程ID，找不到则回退到章纲线程或默认"""
         if not character_name:
             return req.thread_id
         # 精确匹配
@@ -2864,11 +2989,15 @@ async def ai_generate_detailed_outline(book_id: str, req: DetailedOutlineReq):
 ## 节拍序列（Beat）
 {json.dumps(target_co.get('beats', []), ensure_ascii=False, indent=2)}
 
-## 情感弧线
-{json.dumps(target_co.get('emotional_arc', {}), ensure_ascii=False)}
-
 ## 必须完成的叙事任务
 {json.dumps(target_co.get('mandatory_tasks', []), ensure_ascii=False)}
+{f'''
+## 视角要求
+{target_co.get('pov', '')}
+''' if target_co.get('pov') else ''}{f'''
+## 写作基调（本章重要指导）
+{target_co.get('writing_notes', '')}
+''' if target_co.get('writing_notes') else ''}
 
 ## 用户追加的剧情点（重要！必须在细纲中体现）
 {req.extra_points or '无'}
